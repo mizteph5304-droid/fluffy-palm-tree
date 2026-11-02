@@ -1,0 +1,120 @@
+# Codemagic CI/CD — builds a signed IPA on a Mac in the cloud
+# Docs: https://docs.codemagic.io/yaml/yaml-getting-started/
+#
+# Setup steps (one-time):
+# 1. Push this repo to GitHub / GitLab / Bitbucket
+# 2. Sign up at https://codemagic.io (free tier is enough to start)
+# 3. Add the app → select this repository
+# 4. In Codemagic UI → Teams → Personal account → Code signing identities:
+#      - Upload your iOS Distribution certificate (.p12) OR let Codemagic
+#        fetch them with an App Store Connect API key
+# 5. Environment variables / secrets (Application or Team level):
+#      APP_STORE_CONNECT_ISSUER_ID
+#      APP_STORE_CONNECT_KEY_IDENTIFIER
+#      APP_STORE_CONNECT_PRIVATE_KEY   (contents of the .p8 file)
+#      CERTIFICATE_PRIVATE_KEY        (optional, if using manual certs)
+# 6. Start a build. IPA appears under Artifacts when finished.
+
+workflows:
+  ios-ipa:
+    name: Pulse iOS IPA
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: codemagic   # name of the ASC integration you create in UI
+    environment:
+      ios_signing:
+        distribution_type: ad_hoc    # or: development | app_store
+        bundle_identifier: com.pulse.mediaplayer
+      vars:
+        XCODE_WORKSPACE: "Pulse.xcworkspace"   # not used; we use the .xcodeproj
+        XCODE_PROJECT: "Pulse.xcodeproj"
+        XCODE_SCHEME: "Pulse"
+        BUNDLE_ID: "com.pulse.mediaplayer"
+        # Set your Apple Team ID (10 characters) in Codemagic UI → Environment variables
+        # TEAM_ID: "XXXXXXXXXX"
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Install XcodeGen
+        script: |
+          brew install xcodegen
+      - name: Generate Xcode project
+        script: |
+          xcodegen generate
+      - name: Set up code signing
+        script: |
+          xcode-project use-profiles
+      - name: Patch export options with Team ID
+        script: |
+          if [ -n "$TEAM_ID" ]; then
+            plutil -replace teamID -string "$TEAM_ID" "$CM_BUILD_DIR/ci/ExportOptions-ad-hoc.plist" || true
+          fi
+      - name: Build IPA
+        script: |
+          set -e
+          xcodebuild -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath "$CM_BUILD_DIR/build/Pulse.xcarchive" \
+            clean archive \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="${TEAM_ID:-}" \
+            CURRENT_PROJECT_VERSION="${PROJECT_BUILD_NUMBER:-1}" \
+            MARKETING_VERSION="1.0.0"
+          xcodebuild -exportArchive \
+            -archivePath "$CM_BUILD_DIR/build/Pulse.xcarchive" \
+            -exportOptionsPlist "$CM_BUILD_DIR/ci/ExportOptions-ad-hoc.plist" \
+            -exportPath "$CM_BUILD_DIR/build/export" \
+            -allowProvisioningUpdates
+    artifacts:
+      - build/export/*.ipa
+      - build/export/*.dSYM
+      - build/**/*.xcarchive
+    publishing:
+      email:
+        recipients:
+          - $CM_BUILD_EMAIL
+        notify:
+          success: true
+          failure: true
+
+  # Alternative: Development-signed IPA (install on registered devices only)
+  ios-dev:
+    name: Pulse iOS Development
+    max_build_duration: 45
+    instance_type: mac_mini_m2
+    environment:
+      ios_signing:
+        distribution_type: development
+        bundle_identifier: com.pulse.mediaplayer
+      vars:
+        XCODE_PROJECT: "Pulse.xcodeproj"
+        XCODE_SCHEME: "Pulse"
+      xcode: latest
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Set up code signing
+        script: xcode-project use-profiles
+      - name: Archive & export (development)
+        script: |
+          set -e
+          xcodebuild -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath build/Pulse.xcarchive \
+            clean archive \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="${TEAM_ID:-}"
+          xcodebuild -exportArchive \
+            -archivePath build/Pulse.xcarchive \
+            -exportOptionsPlist ci/ExportOptions-development.plist \
+            -exportPath build/export \
+            -allowProvisioningUpdates
+    artifacts:
+      - build/export/*.ipa
